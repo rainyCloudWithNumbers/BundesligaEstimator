@@ -1,0 +1,50 @@
+# Build and Tooling
+.gradle/
+build/
+bin/
+gen/
+out/
+.kotlin/
+
+# Android Specific
+local.properties
+.externalNativeBuild/
+.cxx/
+captures/
+*.apk
+*.ap_
+*.dex
+memory.pydump
+
+# IntelliJ / Android Studio
+*.iml
+*.ipr
+*.iws
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/shelf/
+.idea/jsLibraryMappings.xml
+.idea/tasks.xml
+.idea/usageStats.xml
+.idea/vcs.xml
+.idea/modules/
+.idea/deploymentTargetDropDown.xml
+
+# Python (since BL_Tool2.py exists)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# OS and Misc
+.DS_Store
+Thumbs.db
+*.log
+*.bak
+*.swp
