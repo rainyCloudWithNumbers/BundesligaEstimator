@@ -63,6 +63,7 @@ data class ConditionalResult(
     val points: Int,
     val probabilityReached: Float,
     val probabilityMeister: Float,
+    val probabilityDirectPromotion: Float = 0f,
     val probabilityReleUp: Float,
     val probabilityReleDown: Float,
     val probabilitySafe: Float,
@@ -95,6 +96,7 @@ data class TeamSimulationResult(
     val name: String,
     val currentPoints: Int,
     val probMeister: Float,
+    val probDirectPromotion: Float = 0f,
     val probReleUp: Float,
     val probReleDown: Float,
     val probSafe: Float,
@@ -222,6 +224,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             
             if (frequency > 0 || (teamMatches.size <= 3)) { 
                 var meisterCount = 0
+                var directPromotionCount = 0
                 var releUpCount = 0
                 var releDownCount = 0
                 var safeCount = 0
@@ -247,6 +250,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
                     val rank = sorted.indexOfFirst { it.first == teamName }
                     
                     if (rank == 0) meisterCount++
+                    if (rank <= 1) directPromotionCount++
                     if (rank == 2) releUpCount++ 
                     if (rank == 15 && !isBl3) releDownCount++ 
                     if (rank < 15) safeCount++
@@ -256,6 +260,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
                     points = finalPoints,
                     probabilityReached = frequency, 
                     probabilityMeister = (meisterCount.toFloat() / innerSimulations) * 100,
+                    probabilityDirectPromotion = (directPromotionCount.toFloat() / innerSimulations) * 100,
                     probabilityReleUp = (releUpCount.toFloat() / innerSimulations) * 100,
                     probabilityReleDown = (releDownCount.toFloat() / innerSimulations) * 100,
                     probabilitySafe = (safeCount.toFloat() / innerSimulations) * 100,
@@ -267,8 +272,9 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
     }
 
     private fun performMonteCarlo(table: List<Team>, remaining: List<Match>): List<TeamSimulationResult> {
-        val teamStats = table.associate { it.teamName to mutableMapOf("meister" to 0, "releUp" to 0, "releDown" to 0, "safe" to 0) }
+        val teamStats = table.associate { it.teamName to mutableMapOf("meister" to 0, "directPromotion" to 0, "releUp" to 0, "releDown" to 0, "safe" to 0) }
         val isBl3 = selectedLeague == "bl3"
+        val isBl1 = selectedLeague == "bl1"
 
         repeat(monteCarloIterations) {
             val tempPoints = table.associate { it.teamName to it.points }.toMutableMap()
@@ -289,6 +295,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             sorted.forEachIndexed { index, (name, _) ->
                 val stats = teamStats[name] ?: return@forEachIndexed
                 if (index == 0) stats["meister"] = stats["meister"]!! + 1
+                if (index <= 1) stats["directPromotion"] = stats["directPromotion"]!! + 1
                 if (index == 2) stats["releUp"] = stats["releUp"]!! + 1
                 if (index == 15 && !isBl3) stats["releDown"] = stats["releDown"]!! + 1
                 if (index < 15) stats["safe"] = stats["safe"]!! + 1
@@ -298,6 +305,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
         return table.map { team ->
             val stats = teamStats[team.teamName]!!
             val pMeister = (stats["meister"]!!.toFloat() / monteCarloIterations) * 100
+            val pDirectPromotion = (stats["directPromotion"]!!.toFloat() / monteCarloIterations) * 100
             val pReleUp = (stats["releUp"]!!.toFloat() / monteCarloIterations) * 100
             val pReleDown = (stats["releDown"]!!.toFloat() / monteCarloIterations) * 100
             val pSafe = (stats["safe"]!!.toFloat() / monteCarloIterations) * 100
@@ -308,6 +316,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
                 name = team.teamName,
                 currentPoints = team.points,
                 probMeister = pMeister,
+                probDirectPromotion = pDirectPromotion,
                 probReleUp = pReleUp,
                 probReleDown = pReleDown,
                 probSafe = pSafe,
@@ -354,7 +363,7 @@ fun BundesligaApp(viewModel: MainViewModel) {
                     }
                     Button(onClick = { viewModel.runSimulation() }, enabled = !viewModel.isLoading) {
                         if (viewModel.isLoading) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Text("Simulate")
+                        else Text("Run")
                     }
                 }
             )
@@ -362,10 +371,10 @@ fun BundesligaApp(viewModel: MainViewModel) {
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
             LeagueSelector(viewModel)
-            TableHeader()
+            TableHeader(viewModel.selectedLeague)
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(viewModel.simulationResults) { result ->
-                    TeamRow(result) { viewModel.showDetails(result) }
+                    TeamRow(result, viewModel.selectedLeague) { viewModel.showDetails(result) }
                 }
             }
         }
@@ -477,7 +486,7 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                 Row(modifier = Modifier.fillMaxWidth().background(Color.LightGray).padding(4.dp)) {
                     Text("Pkt", modifier = Modifier.weight(0.6f), fontWeight = FontWeight.Bold, fontSize = 10.sp)
                     Text("Distr.", modifier = Modifier.weight(1.2f), fontWeight = FontWeight.Bold, fontSize = 10.sp)
-                    Text("Mst/Sich", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Text(if (isBl1) "Mst/Sich" else "Auf/Sich", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold, fontSize = 10.sp)
                     Text("Rel +/-", modifier = Modifier.weight(1.1f), fontWeight = FontWeight.Bold, fontSize = 10.sp)
                 }
                 LazyColumn(modifier = Modifier.heightIn(max = 450.dp)) {
@@ -496,11 +505,20 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                                 Text("${String.format("%.1f", row.monteCarloFrequency)}%", fontSize = 9.sp)
                             }
                             
-                            // Main Metric: Switch between Meister and Safe based on point level
-                            val useMeister = row.probabilityMeister > 0.5f && row.points > (teamResult.currentPoints + (details.last().points - teamResult.currentPoints) / 2)
-                            val mainVal = if (useMeister) row.probabilityMeister else row.probabilitySafe
-                            val mainLabel = if (useMeister) "M:" else "S:"
-                            val mainColor = if (useMeister) Color(0xFFFFD700) else (if (mainVal > 80f) Color(0xFF4CAF50) else if (mainVal > 30f) Color(0xFFFFC107) else Color(0xFFF44336))
+                            // Main Metric logic
+                            val threshold = (teamResult.currentPoints + (details.last().points - teamResult.currentPoints) / 2)
+                            val useHighGoal = if (isBl1) {
+                                row.probabilityMeister > 0.5f && row.points > threshold
+                            } else {
+                                row.probabilityDirectPromotion > 0.5f && row.points > threshold
+                            }
+
+                            val mainVal = if (useHighGoal) (if (isBl1) row.probabilityMeister else row.probabilityDirectPromotion) else row.probabilitySafe
+                            val mainLabel = if (useHighGoal) (if (isBl1) "M:" else "A:") else "S:"
+                            val asterisk = if (!isBl1 && useHighGoal && row.probabilityMeister > 50f) "*" else ""
+                            
+                            val mainColor = if (useHighGoal) (if (isBl1) Color(0xFFFFD700) else Color(0xFF2196F3)) 
+                                            else (if (mainVal > 80f) Color(0xFF4CAF50) else if (mainVal > 30f) Color(0xFFFFC107) else Color(0xFFF44336))
                             
                             Column(modifier = Modifier.weight(1.3f).padding(end = 4.dp)) {
                                 LinearProgressIndicator(
@@ -509,13 +527,13 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                                     color = mainColor,
                                     trackColor = mainColor.copy(alpha = 0.1f)
                                 )
-                                Text("$mainLabel ${String.format("%.1f", mainVal)}%", fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                                Text("$mainLabel ${String.format("%.1f", mainVal)}%$asterisk", fontSize = 9.sp, fontWeight = FontWeight.Medium)
                             }
 
                             // Relegation Decision: Show either Upward or Downward Relegation per row
                             val useReleUp = row.probabilityReleUp >= row.probabilityReleDown
                             val releVal = if (useReleUp) row.probabilityReleUp else row.probabilityReleDown
-                            val releLabel = if (useReleUp) (if (isBl1) "3.P" else "Auf") else "Ab"
+                            val releLabel = if (useReleUp) (if (isBl1) "3.P" else "Rel") else "Ab"
                             val releColor = if (useReleUp) Color(0xFF9C27B0) else Color(0xFFFF9800)
 
                             Column(modifier = Modifier.weight(1.1f)) {
@@ -531,7 +549,8 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                     }
                 }
                 Text(
-                    "Distr: Relative Häufigkeit. M: Meister, S: Sicher, 3.P/Auf: Rele Auf, Ab: Rele Ab.",
+                    if (isBl1) "Distr: Rel. Häufigkeit. M: Meister, S: Sicher, 3.P: Rele Auf, Ab: Rele Ab."
+                    else "Distr: Rel. Häufigkeit. A: Aufstieg (*=Mst >50%), S: Sicher, Rel: Rele Auf, Ab: Rele Ab.",
                     fontSize = 9.sp,
                     modifier = Modifier.padding(top = 8.dp),
                     color = Color.Gray
@@ -571,19 +590,21 @@ fun LeagueSelector(viewModel: MainViewModel) {
 }
 
 @Composable
-fun TableHeader() {
+fun TableHeader(league: String) {
+    val isBl1 = league == "bl1"
     Row(modifier = Modifier.fillMaxWidth().background(Color.LightGray).padding(8.dp)) {
         Text("#", modifier = Modifier.weight(0.4f), fontWeight = FontWeight.Bold)
         Text("Team", modifier = Modifier.weight(1.6f), fontWeight = FontWeight.Bold)
         Text("Pts", modifier = Modifier.weight(0.5f), fontWeight = FontWeight.Bold)
-        Text("Meister", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+        Text(if (isBl1) "Meister" else "Aufst.", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
         Text("Safe", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
         Text("Abst.", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
     }
 }
 
 @Composable
-fun TeamRow(result: TeamSimulationResult, onClick: () -> Unit) {
+fun TeamRow(result: TeamSimulationResult, league: String, onClick: () -> Unit) {
+    val isBl1 = league == "bl1"
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
         onClick = onClick
@@ -593,7 +614,10 @@ fun TeamRow(result: TeamSimulationResult, onClick: () -> Unit) {
             Text(result.name, modifier = Modifier.weight(1.6f), maxLines = 1)
             Text(result.currentPoints.toString(), modifier = Modifier.weight(0.5f))
             
-            ProbabilityBar(result.probMeister, Color(0xFFFFD700), Modifier.weight(1f))
+            val topProb = if (isBl1) result.probMeister else result.probDirectPromotion
+            val topColor = if (isBl1) Color(0xFFFFD700) else Color(0xFF2196F3)
+            
+            ProbabilityBar(topProb, topColor, Modifier.weight(1f))
             ProbabilityBar(result.probSafe, Color(0xFF4CAF50), Modifier.weight(1f))
             ProbabilityBar(result.probAbstieg, Color(0xFFF44336), Modifier.weight(1f))
         }
