@@ -19,12 +19,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -44,7 +46,8 @@ import kotlin.random.Random
 data class Team(
     val teamName: String,
     val points: Int,
-    val goals: Int
+    val goals: Int,
+    val teamIconUrl: String? = null
 )
 
 @Serializable
@@ -94,6 +97,7 @@ object RetrofitClient {
 data class TeamSimulationResult(
     val rank: Int,
     val name: String,
+    val iconUrl: String?,
     val currentPoints: Int,
     val probMeister: Float,
     val probDirectPromotion: Float = 0f,
@@ -314,6 +318,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             TeamSimulationResult(
                 rank = 0,
                 name = team.teamName,
+                iconUrl = team.teamIconUrl,
                 currentPoints = team.points,
                 probMeister = pMeister,
                 probDirectPromotion = pDirectPromotion,
@@ -479,7 +484,16 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
     
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Analyse: ${teamResult.name}", fontWeight = FontWeight.Bold) },
+        title = { 
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AsyncImage(
+                    model = teamResult.iconUrl,
+                    contentDescription = null,
+                    modifier = Modifier.size(32.dp).padding(end = 8.dp)
+                )
+                Text(teamResult.name, fontWeight = FontWeight.Bold)
+            }
+        },
         text = {
             Column {
                 Text("Wahrscheinlichkeiten nach Endpunktestand:", fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
@@ -578,12 +592,17 @@ fun ProgressBarWithText(value: Float, color: Color, modifier: Modifier) {
 
 @Composable
 fun LeagueSelector(viewModel: MainViewModel) {
-    Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), 
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         listOf("bl1" to "1. BL", "bl2" to "2. BL", "bl3" to "3. BL").forEach { (id, label) ->
             FilterChip(
                 selected = viewModel.selectedLeague == id,
                 onClick = { viewModel.selectedLeague = id; viewModel.runSimulation() },
-                label = { Text(label) }
+                label = { Text(label, fontWeight = if (viewModel.selectedLeague == id) FontWeight.Bold else FontWeight.Normal) },
+                shape = MaterialTheme.shapes.medium
             )
         }
     }
@@ -592,13 +611,19 @@ fun LeagueSelector(viewModel: MainViewModel) {
 @Composable
 fun TableHeader(league: String) {
     val isBl1 = league == "bl1"
-    Row(modifier = Modifier.fillMaxWidth().background(Color.LightGray).padding(8.dp)) {
-        Text("#", modifier = Modifier.weight(0.4f), fontWeight = FontWeight.Bold)
-        Text("Team", modifier = Modifier.weight(1.6f), fontWeight = FontWeight.Bold)
-        Text("Pts", modifier = Modifier.weight(0.5f), fontWeight = FontWeight.Bold)
-        Text(if (isBl1) "Meister" else "Aufst.", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-        Text("Safe", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
-        Text("Abst.", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("#", modifier = Modifier.weight(0.25f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+            Spacer(modifier = Modifier.weight(0.25f)) // Space for icon
+            Text("Team", modifier = Modifier.weight(2.5f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+            Text("Pts", modifier = Modifier.weight(0.5f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+            Text(if (isBl1) "Meister" else "Aufst.", modifier = Modifier.weight(0.75f), fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
+            Text("Safe", modifier = Modifier.weight(0.75f), fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
+            Text("Abst.", modifier = Modifier.weight(0.75f), fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
+        }
     }
 }
 
@@ -606,34 +631,83 @@ fun TableHeader(league: String) {
 fun TeamRow(result: TeamSimulationResult, league: String, onClick: () -> Unit) {
     val isBl1 = league == "bl1"
     Card(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-        onClick = onClick
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        onClick = onClick,
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${result.rank}.", modifier = Modifier.weight(0.4f), fontWeight = FontWeight.Bold)
-            Text(result.name, modifier = Modifier.weight(1.6f), maxLines = 1)
-            Text(result.currentPoints.toString(), modifier = Modifier.weight(0.5f))
+            Text(
+                "${result.rank}.", 
+                modifier = Modifier.weight(0.25f), 
+                fontWeight = FontWeight.Bold, 
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            
+            // Search for the team icon in the original table if we had it, 
+            // but since performMonteCarlo doesn't pass it, we might need a workaround.
+            // For now, I'll assume we can pass the iconUrl or use a placeholder.
+            // Actually, I should have included iconUrl in TeamSimulationResult.
+            
+            AsyncImage(
+                model = result.iconUrl,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp).weight(0.25f).padding(end = 4.dp)
+            )
+            
+            Text(
+                result.name, 
+                modifier = Modifier.weight(2.5f), 
+                maxLines = 1, 
+                overflow = TextOverflow.Ellipsis,
+                softWrap = false,
+                fontWeight = FontWeight.Medium,
+                fontSize = 14.sp
+            )
+            
+            Text(
+                result.currentPoints.toString(), 
+                modifier = Modifier.weight(0.5f),
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp
+            )
             
             val topProb = if (isBl1) result.probMeister else result.probDirectPromotion
             val topColor = if (isBl1) Color(0xFFFFD700) else Color(0xFF2196F3)
             
-            ProbabilityBar(topProb, topColor, Modifier.weight(1f))
-            ProbabilityBar(result.probSafe, Color(0xFF4CAF50), Modifier.weight(1f))
-            ProbabilityBar(result.probAbstieg, Color(0xFFF44336), Modifier.weight(1f))
+            ProbabilityBar(topProb, topColor, Modifier.weight(0.75f))
+            ProbabilityBar(result.probSafe, Color(0xFF4CAF50), Modifier.weight(0.75f))
+            ProbabilityBar(result.probAbstieg, Color(0xFFF44336), Modifier.weight(0.75f))
         }
     }
 }
 
 @Composable
 fun ProbabilityBar(prob: Float, color: Color, modifier: Modifier) {
-    Column(modifier = modifier.padding(horizontal = 2.dp)) {
-        LinearProgressIndicator(
-            progress = { prob / 100f },
-            modifier = Modifier.fillMaxWidth().height(8.dp),
-            color = color,
-            trackColor = color.copy(alpha = 0.2f)
-        )
-        Text("${prob.toInt()}%", fontSize = 10.sp)
+    Column(modifier = modifier.padding(horizontal = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(20.dp)
+                .background(color.copy(alpha = 0.15f), shape = MaterialTheme.shapes.extraSmall),
+            contentAlignment = Alignment.Center
+        ) {
+            // Background fill
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(prob / 100f)
+                    .fillMaxHeight()
+                    .align(Alignment.CenterStart)
+                    .background(color, shape = MaterialTheme.shapes.extraSmall)
+            )
+            Text(
+                "${prob.toInt()}%", 
+                fontSize = 10.sp, 
+                fontWeight = FontWeight.Bold,
+                color = if (prob > 50) Color.White else Color.Black
+            )
+        }
     }
 }
 
