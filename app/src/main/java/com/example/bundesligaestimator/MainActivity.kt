@@ -10,15 +10,18 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,6 +41,7 @@ import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.http.GET
 import retrofit2.http.Path
+import retrofit2.http.Query
 import kotlin.random.Random
 
 // --- Models ---
@@ -73,6 +77,29 @@ data class ConditionalResult(
     val monteCarloFrequency: Float = 0f
 )
 
+@Serializable
+data class OddsResponse(
+    val home_team: String,
+    val away_team: String,
+    val bookmakers: List<Bookmaker>
+)
+
+@Serializable
+data class Bookmaker(
+    val markets: List<Market>
+)
+
+@Serializable
+data class Market(
+    val outcomes: List<Outcome>
+)
+
+@Serializable
+data class Outcome(
+    val name: String,
+    val price: Float
+)
+
 // --- API ---
 
 interface OpenLigaApi {
@@ -83,6 +110,16 @@ interface OpenLigaApi {
     suspend fun getMatches(@Path("league") league: String, @Path("season") season: String): List<Match>
 }
 
+interface OddsApi {
+    @GET("v4/sports/{sport}/odds/")
+    suspend fun getOdds(
+        @Path("sport") sport: String,
+        @Query("apiKey") apiKey: String,
+        @Query("regions") regions: String = "eu",
+        @Query("markets") markets: String = "h2h"
+    ): List<OddsResponse>
+}
+
 object RetrofitClient {
     private val json = Json { ignoreUnknownKeys = true }
     val api: OpenLigaApi = Retrofit.Builder()
@@ -90,6 +127,12 @@ object RetrofitClient {
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
         .build()
         .create(OpenLigaApi::class.java)
+
+    val oddsApi: OddsApi = Retrofit.Builder()
+        .baseUrl("https://api.the-odds-api.com/")
+        .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+        .build()
+        .create(OddsApi::class.java)
 }
 
 // --- Logic & ViewModel ---
@@ -118,6 +161,10 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
     var probHomeWin by mutableFloatStateOf(0.45f)
     var probDraw by mutableFloatStateOf(0.25f)
 
+    var oddsApiKey by mutableStateOf("")
+    var useOdds by mutableStateOf(false)
+    var cachedOdds by mutableStateOf<Map<String, MatchProbabilities>>(emptyMap())
+
     init {
         viewModelScope.launch {
             season = repository.season.first()
@@ -125,24 +172,36 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             detailSimulations = repository.detailSimulations.first()
             probHomeWin = repository.probHomeWin.first()
             probDraw = repository.probDraw.first()
+            oddsApiKey = repository.oddsApiKey.first()
+            useOdds = repository.useOdds.first()
         }
     }
 
     var selectedTeamDetails by mutableStateOf<List<ConditionalResult>?>(null)
     var detailedTeamResult by mutableStateOf<TeamSimulationResult?>(null)
 
-    fun updateSettings(newSeason: String, mcIter: Int, detSim: Int, pWin: Float, pDraw: Float) {
+    fun updateSettings(newSeason: String, mcIter: Int, detSim: Int, pWin: Float, pDraw: Float, apiKey: String, useO: Boolean) {
         viewModelScope.launch {
             season = newSeason
             monteCarloIterations = mcIter
             detailSimulations = detSim
             probHomeWin = pWin
             probDraw = pDraw
+            oddsApiKey = apiKey
+            useOdds = useO
             
             repository.updateSeason(newSeason)
             repository.updateMonteCarloIterations(mcIter)
             repository.updateDetailSimulations(detSim)
             repository.updateProbabilities(pWin, pDraw)
+            repository.updateOddsSettings(apiKey, useO)
+        }
+    }
+
+    fun updateUseOdds(value: Boolean) {
+        useOdds = value
+        viewModelScope.launch {
+            repository.updateOddsSettings(oddsApiKey, value)
         }
     }
 
@@ -155,10 +214,61 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
         }
     }
 
+    data class MatchProbabilities(val home: Float, val draw: Float)
+
+    private suspend fun fetchOdds() {
+        if (!useOdds || oddsApiKey.isBlank()) {
+            cachedOdds = emptyMap()
+            return
+        }
+
+        val sport = when (selectedLeague) {
+            "bl1" -> "soccer_germany_bundesliga"
+            "bl2" -> "soccer_germany_bundesliga_2"
+            else -> null
+        } ?: return
+
+        try {
+            val response = RetrofitClient.oddsApi.getOdds(sport, oddsApiKey)
+            cachedOdds = response.associate { odds ->
+                val h2h = odds.bookmakers.firstOrNull()?.markets?.find { it.outcomes.size == 3 }
+                if (h2h != null) {
+                    val pHome = 1f / (h2h.outcomes.find { it.name == odds.home_team }?.price ?: 2f)
+                    val pAway = 1f / (h2h.outcomes.find { it.name == odds.away_team }?.price ?: 3f)
+                    val pDraw = 1f / (h2h.outcomes.find { it.name == "Draw" }?.price ?: 3f)
+                    val sum = pHome + pAway + pDraw
+                    val key = "${odds.home_team} - ${odds.away_team}"
+                    key to MatchProbabilities(pHome / sum, pDraw / sum)
+                } else {
+                    "" to MatchProbabilities(0.45f, 0.25f)
+                }
+            }.filterKeys { it.isNotEmpty() }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun getMatchProbabilities(match: Match): MatchProbabilities {
+        if (useOdds) {
+            // Improved matching logic for team names
+            val t1 = match.team1.teamName.lowercase()
+            val t2 = match.team2.teamName.lowercase()
+            
+            val key = cachedOdds.keys.find { oddsKey ->
+                val ok = oddsKey.lowercase()
+                (ok.contains(t1) || t1.contains(ok.split("-")[0].lowercase())) && 
+                (ok.contains(t2) || t2.contains(ok.split("-")[1].lowercase()))
+            }
+            if (key != null) return cachedOdds[key]!!
+        }
+        return MatchProbabilities(probHomeWin, probDraw)
+    }
+
     fun runSimulation() {
         viewModelScope.launch {
             isLoading = true
             try {
+                if (useOdds) fetchOdds()
                 val table = RetrofitClient.api.getTable(selectedLeague, season)
                 val allMatches = RetrofitClient.api.getMatches(selectedLeague, season)
                 val remainingMatches = allMatches.filter { !it.matchIsFinished }
@@ -210,9 +320,10 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
         repeat(detailSimulations) {
             var pts = currentPts
             for (match in teamMatches) {
+                val probs = getMatchProbabilities(match)
                 val r = Random.nextFloat()
-                if (r < probHomeWin) pts += 3
-                else if (r < (probHomeWin + probDraw)) pts += 1
+                if (r < probs.home) pts += 3
+                else if (r < (probs.home + probs.draw)) pts += 1
             }
             pointCounts[pts] = pointCounts.getOrDefault(pts, 0) + 1
         }
@@ -239,10 +350,11 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
                     tempPoints[teamName] = finalPoints
                     
                     for (match in otherMatches) {
+                        val probs = getMatchProbabilities(match)
                         val r = Random.nextFloat()
-                        if (r < probHomeWin) {
+                        if (r < probs.home) {
                             tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 3
-                        } else if (r < (probHomeWin + probDraw)) {
+                        } else if (r < (probs.home + probs.draw)) {
                             tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 1
                             tempPoints[match.team2.teamName] = (tempPoints[match.team2.teamName] ?: 0) + 1
                         } else {
@@ -284,10 +396,11 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             val tempPoints = table.associate { it.teamName to it.points }.toMutableMap()
             
             for (match in remaining) {
+                val probs = getMatchProbabilities(match)
                 val r = Random.nextFloat()
-                if (r < probHomeWin) {
+                if (r < probs.home) {
                     tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 3
-                } else if (r < (probHomeWin + probDraw)) {
+                } else if (r < (probs.home + probs.draw)) {
                     tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 1
                     tempPoints[match.team2.teamName] = (tempPoints[match.team2.teamName] ?: 0) + 1
                 } else {
@@ -348,6 +461,7 @@ class MainViewModelFactory(private val repository: SettingsRepository) : ViewMod
 @Composable
 fun BundesligaApp(viewModel: MainViewModel) {
     var showSettings by remember { mutableStateOf(false) }
+    var showOddsDebug by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -376,6 +490,23 @@ fun BundesligaApp(viewModel: MainViewModel) {
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
             LeagueSelector(viewModel)
+            if (viewModel.oddsApiKey.isNotBlank()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = viewModel.useOdds,
+                        onCheckedChange = { viewModel.updateUseOdds(it) }
+                    )
+                    Text("Use Odds API for next games", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    if (viewModel.useOdds) {
+                        IconButton(onClick = { showOddsDebug = true }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Info, contentDescription = "Show Odds", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
             TableHeader(viewModel.selectedLeague)
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(viewModel.simulationResults) { result ->
@@ -396,7 +527,45 @@ fun BundesligaApp(viewModel: MainViewModel) {
         if (showSettings) {
             SettingsDialog(viewModel, onDismiss = { showSettings = false })
         }
+
+        if (showOddsDebug) {
+            OddsDebugDialog(viewModel, onDismiss = { showOddsDebug = false })
+        }
     }
+}
+
+@Composable
+fun OddsDebugDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Gelesene Quoten (Next Games)") },
+        text = {
+            if (viewModel.cachedOdds.isEmpty()) {
+                Text("Keine Quoten geladen. Drücke 'Run' um sie zu aktualisieren.")
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+                    items(viewModel.cachedOdds.toList()) { (match, probs) ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text(match, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Home: ${(probs.home * 100).toInt()}%", fontSize = 11.sp)
+                                    Text("Draw: ${(probs.draw * 100).toInt()}%", fontSize = 11.sp)
+                                    Text("Away: ${((1f - probs.home - probs.draw) * 100).toInt()}%", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("OK") }
+        }
+    )
 }
 
 @Composable
@@ -406,6 +575,8 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
     var detSimText by remember { mutableStateOf(viewModel.detailSimulations.toString()) }
     var probWinText by remember { mutableStateOf(viewModel.probHomeWin.toString()) }
     var probDrawText by remember { mutableStateOf(viewModel.probDraw.toString()) }
+    var oddsApiKeyText by remember { mutableStateOf(viewModel.oddsApiKey) }
+    var useOddsValue by remember { mutableStateOf(viewModel.useOdds) }
     
     var seasonError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -423,6 +594,16 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     supportingText = { seasonError?.let { Text(it) } },
                     modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    value = oddsApiKeyText,
+                    onValueChange = { oddsApiKeyText = it },
+                    label = { Text("Odds API Key") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = useOddsValue, onCheckedChange = { useOddsValue = it })
+                    Text("Use Odds by default")
+                }
                 OutlinedTextField(
                     value = mcIterText,
                     onValueChange = { mcIterText = it },
@@ -461,7 +642,9 @@ fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                             mcIterText.toIntOrNull() ?: 5000,
                             detSimText.toIntOrNull() ?: 10000,
                             probWinText.toFloatOrNull() ?: 0.45f,
-                            probDrawText.toFloatOrNull() ?: 0.25f
+                            probDrawText.toFloatOrNull() ?: 0.25f,
+                            oddsApiKeyText,
+                            useOddsValue
                         )
                         onDismiss()
                     } else {
@@ -615,14 +798,20 @@ fun TableHeader(league: String) {
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("#", modifier = Modifier.weight(0.25f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
-            Spacer(modifier = Modifier.weight(0.25f)) // Space for icon
-            Text("Team", modifier = Modifier.weight(2.5f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
-            Text("Pts", modifier = Modifier.weight(0.5f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
-            Text(if (isBl1) "Meister" else "Aufst.", modifier = Modifier.weight(0.75f), fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
-            Text("Safe", modifier = Modifier.weight(0.75f), fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
-            Text("Abst.", modifier = Modifier.weight(0.75f), fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp), 
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("#", modifier = Modifier.width(28.dp), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+            Spacer(modifier = Modifier.width(28.dp)) // Space for icon
+            Text("Team", modifier = Modifier.weight(1f), fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+            Text("Pts", modifier = Modifier.width(32.dp), textAlign = TextAlign.End, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(if (isBl1) "Meister" else "Aufst.", modifier = Modifier.width(60.dp), textAlign = TextAlign.Center, fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
+            Text("Safe", modifier = Modifier.width(60.dp), textAlign = TextAlign.Center, fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
+            Text("Abst.", modifier = Modifier.width(60.dp), textAlign = TextAlign.Center, fontWeight = FontWeight.ExtraBold, fontSize = 10.sp)
         }
     }
 }
@@ -631,34 +820,38 @@ fun TableHeader(league: String) {
 fun TeamRow(result: TeamSimulationResult, league: String, onClick: () -> Unit) {
     val isBl1 = league == "bl1"
     Card(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
         onClick = onClick,
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .padding(horizontal = 8.dp), 
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 "${result.rank}.", 
-                modifier = Modifier.weight(0.25f), 
+                modifier = Modifier.width(28.dp), 
                 fontWeight = FontWeight.Bold, 
                 fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.primary
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1
             )
-            
-            // Search for the team icon in the original table if we had it, 
-            // but since performMonteCarlo doesn't pass it, we might need a workaround.
-            // For now, I'll assume we can pass the iconUrl or use a placeholder.
-            // Actually, I should have included iconUrl in TeamSimulationResult.
             
             AsyncImage(
                 model = result.iconUrl,
                 contentDescription = null,
-                modifier = Modifier.size(24.dp).weight(0.25f).padding(end = 4.dp)
+                modifier = Modifier.size(28.dp).padding(end = 8.dp),
+                contentScale = ContentScale.Fit,
+                error = painterResource(id = android.R.drawable.ic_menu_help)
             )
             
             Text(
                 result.name, 
-                modifier = Modifier.weight(2.5f), 
+                modifier = Modifier.weight(1f), 
                 maxLines = 1, 
                 overflow = TextOverflow.Ellipsis,
                 softWrap = false,
@@ -668,32 +861,35 @@ fun TeamRow(result: TeamSimulationResult, league: String, onClick: () -> Unit) {
             
             Text(
                 result.currentPoints.toString(), 
-                modifier = Modifier.weight(0.5f),
+                modifier = Modifier.width(32.dp),
+                textAlign = TextAlign.End,
                 fontWeight = FontWeight.Bold,
-                fontSize = 14.sp
+                fontSize = 14.sp,
+                maxLines = 1
             )
             
+            Spacer(modifier = Modifier.width(8.dp))
+
             val topProb = if (isBl1) result.probMeister else result.probDirectPromotion
             val topColor = if (isBl1) Color(0xFFFFD700) else Color(0xFF2196F3)
             
-            ProbabilityBar(topProb, topColor, Modifier.weight(0.75f))
-            ProbabilityBar(result.probSafe, Color(0xFF4CAF50), Modifier.weight(0.75f))
-            ProbabilityBar(result.probAbstieg, Color(0xFFF44336), Modifier.weight(0.75f))
+            ProbabilityBar(topProb, topColor, Modifier.width(60.dp))
+            ProbabilityBar(result.probSafe, Color(0xFF4CAF50), Modifier.width(60.dp))
+            ProbabilityBar(result.probAbstieg, Color(0xFFF44336), Modifier.width(60.dp))
         }
     }
 }
 
 @Composable
 fun ProbabilityBar(prob: Float, color: Color, modifier: Modifier) {
-    Column(modifier = modifier.padding(horizontal = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(modifier = modifier.padding(horizontal = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(20.dp)
+                .height(24.dp)
                 .background(color.copy(alpha = 0.15f), shape = MaterialTheme.shapes.extraSmall),
             contentAlignment = Alignment.Center
         ) {
-            // Background fill
             Box(
                 modifier = Modifier
                     .fillMaxWidth(prob / 100f)
@@ -705,7 +901,8 @@ fun ProbabilityBar(prob: Float, color: Color, modifier: Modifier) {
                 "${prob.toInt()}%", 
                 fontSize = 10.sp, 
                 fontWeight = FontWeight.Bold,
-                color = if (prob > 50) Color.White else Color.Black
+                color = if (prob > 50) Color.White else Color.Black,
+                maxLines = 1
             )
         }
     }
