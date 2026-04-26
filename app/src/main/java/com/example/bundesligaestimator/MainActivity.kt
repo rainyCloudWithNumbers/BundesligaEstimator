@@ -29,7 +29,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.compose.LocalImageLoader
+import coil.decode.SvgDecoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -37,6 +40,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.http.GET
@@ -51,6 +56,8 @@ data class Team(
     val teamName: String,
     val points: Int,
     val goals: Int,
+    val opponentGoals: Int? = 0,
+    val goalDiff: Int? = 0,
     val teamIconUrl: String? = null
 )
 
@@ -117,7 +124,7 @@ interface OddsApi {
         @Query("apiKey") apiKey: String,
         @Query("regions") regions: String = "eu",
         @Query("markets") markets: String = "h2h"
-    ): List<OddsResponse>
+    ): Response<List<OddsResponse>>
 }
 
 object RetrofitClient {
@@ -164,6 +171,9 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
     var oddsApiKey by mutableStateOf("")
     var useOdds by mutableStateOf(false)
     var cachedOdds by mutableStateOf<Map<String, MatchProbabilities>>(emptyMap())
+    
+    var oddsQuotaUsed by mutableStateOf<String?>(null)
+    var oddsQuotaRemaining by mutableStateOf<String?>(null)
 
     init {
         viewModelScope.launch {
@@ -230,19 +240,25 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
 
         try {
             val response = RetrofitClient.oddsApi.getOdds(sport, oddsApiKey)
-            cachedOdds = response.associate { odds ->
-                val h2h = odds.bookmakers.firstOrNull()?.markets?.find { it.outcomes.size == 3 }
-                if (h2h != null) {
-                    val pHome = 1f / (h2h.outcomes.find { it.name == odds.home_team }?.price ?: 2f)
-                    val pAway = 1f / (h2h.outcomes.find { it.name == odds.away_team }?.price ?: 3f)
-                    val pDraw = 1f / (h2h.outcomes.find { it.name == "Draw" }?.price ?: 3f)
-                    val sum = pHome + pAway + pDraw
-                    val key = "${odds.home_team} - ${odds.away_team}"
-                    key to MatchProbabilities(pHome / sum, pDraw / sum)
-                } else {
-                    "" to MatchProbabilities(0.45f, 0.25f)
-                }
-            }.filterKeys { it.isNotEmpty() }
+            if (response.isSuccessful) {
+                oddsQuotaUsed = response.headers()["x-requests-used"]
+                oddsQuotaRemaining = response.headers()["x-requests-remaining"]
+                
+                val body = response.body() ?: emptyList()
+                cachedOdds = body.associate { odds ->
+                    val h2h = odds.bookmakers.firstOrNull()?.markets?.find { it.outcomes.size == 3 }
+                    if (h2h != null) {
+                        val pHome = 1f / (h2h.outcomes.find { it.name == odds.home_team }?.price ?: 2f)
+                        val pAway = 1f / (h2h.outcomes.find { it.name == odds.away_team }?.price ?: 3f)
+                        val pDraw = 1f / (h2h.outcomes.find { it.name == "Draw" }?.price ?: 3f)
+                        val sum = pHome + pAway + pDraw
+                        val key = "${odds.home_team} - ${odds.away_team}"
+                        key to MatchProbabilities(pHome / sum, pDraw / sum)
+                    } else {
+                        "" to MatchProbabilities(0.45f, 0.25f)
+                    }
+                }.filterKeys { it.isNotEmpty() }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -311,86 +327,64 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
         allMatches: List<Match>
     ): List<ConditionalResult> {
         val remaining = allMatches.filter { !it.matchIsFinished }
-        val teamMatches = remaining.filter { it.team1.teamName == teamName || it.team2.teamName == teamName }
-        val otherMatches = remaining.filter { it.team1.teamName != teamName && it.team2.teamName != teamName }
-        
-        val currentPts = table.find { it.teamName == teamName }?.points ?: 0
-        
-        val pointCounts = mutableMapOf<Int, Int>()
-        repeat(detailSimulations) {
-            var pts = currentPts
-            for (match in teamMatches) {
+        val currentTeamStats = table.associate { it.teamName to (it.points to (it.goalDiff ?: 0)) }
+        val isBl3 = selectedLeague == "bl3"
+        val safeThreshold = if (isBl3) 16 else 15
+
+        val iterations = detailSimulations
+        val resultsByPoints = mutableMapOf<Int, MutableList<Int>>() 
+
+        repeat(iterations) {
+            val tempPoints = currentTeamStats.mapValues { it.value.first }.toMutableMap()
+            val tempGD = currentTeamStats.mapValues { it.value.second }
+
+            for (match in remaining) {
                 val probs = getMatchProbabilities(match)
                 val r = Random.nextFloat()
-                if (r < probs.home) pts += 3
-                else if (r < (probs.home + probs.draw)) pts += 1
-            }
-            pointCounts[pts] = pointCounts.getOrDefault(pts, 0) + 1
-        }
-
-        val results = mutableListOf<ConditionalResult>()
-        val minPossible = currentPts
-        val maxPossible = currentPts + teamMatches.size * 3
-        
-        val isBl3 = selectedLeague == "bl3"
-
-        for (finalPoints in minPossible..maxPossible) {
-            val frequency = pointCounts.getOrDefault(finalPoints, 0).toFloat() / detailSimulations * 100
-            
-            if (frequency > 0 || (teamMatches.size <= 3)) { 
-                var meisterCount = 0
-                var directPromotionCount = 0
-                var releUpCount = 0
-                var releDownCount = 0
-                var safeCount = 0
-                val innerSimulations = 1000 
+                val t1 = match.team1.teamName
+                val t2 = match.team2.teamName
                 
-                repeat(innerSimulations) {
-                    val tempPoints = table.associate { it.teamName to it.points }.toMutableMap()
-                    tempPoints[teamName] = finalPoints
-                    
-                    for (match in otherMatches) {
-                        val probs = getMatchProbabilities(match)
-                        val r = Random.nextFloat()
-                        if (r < probs.home) {
-                            tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 3
-                        } else if (r < (probs.home + probs.draw)) {
-                            tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 1
-                            tempPoints[match.team2.teamName] = (tempPoints[match.team2.teamName] ?: 0) + 1
-                        } else {
-                            tempPoints[match.team2.teamName] = (tempPoints[match.team2.teamName] ?: 0) + 3
-                        }
-                    }
-                    
-                    val sorted = tempPoints.toList().sortedByDescending { it.second }
-                    val rank = sorted.indexOfFirst { it.first == teamName }
-                    
-                    if (rank == 0) meisterCount++
-                    if (rank <= 1) directPromotionCount++
-                    if (rank == 2) releUpCount++ 
-                    if (rank == 15 && !isBl3) releDownCount++ 
-                    if (rank < 15) safeCount++
-                }
+                if (!tempPoints.containsKey(t1) || !tempPoints.containsKey(t2)) continue
 
-                results.add(ConditionalResult(
-                    points = finalPoints,
-                    probabilityReached = frequency, 
-                    probabilityMeister = (meisterCount.toFloat() / innerSimulations) * 100,
-                    probabilityDirectPromotion = (directPromotionCount.toFloat() / innerSimulations) * 100,
-                    probabilityReleUp = (releUpCount.toFloat() / innerSimulations) * 100,
-                    probabilityReleDown = (releDownCount.toFloat() / innerSimulations) * 100,
-                    probabilitySafe = (safeCount.toFloat() / innerSimulations) * 100,
-                    monteCarloFrequency = frequency
-                ))
+                if (r < probs.home) {
+                    tempPoints[t1] = (tempPoints[t1] ?: 0) + 3
+                } else if (r < (probs.home + probs.draw)) {
+                    tempPoints[t1] = (tempPoints[t1] ?: 0) + 1
+                    tempPoints[t2] = (tempPoints[t2] ?: 0) + 1
+                } else {
+                    tempPoints[t2] = (tempPoints[t2] ?: 0) + 3
+                }
             }
+
+            val finalPts = tempPoints[teamName] ?: 0
+            val sorted = tempPoints.toList().sortedWith(
+                compareByDescending<Pair<String, Int>> { it.second }
+                    .thenByDescending { tempGD[it.first] ?: 0 }
+            )
+            val rank = sorted.indexOfFirst { it.first == teamName }
+            resultsByPoints.getOrPut(finalPts) { mutableListOf() }.add(rank)
         }
-        return results.sortedBy { it.points }
+
+        return resultsByPoints.map { (pts, ranks) ->
+            val count = ranks.size.toFloat()
+            ConditionalResult(
+                points = pts,
+                probabilityReached = (count / iterations) * 100,
+                probabilityMeister = (ranks.count { it == 0 } / count) * 100,
+                probabilityDirectPromotion = (ranks.count { it <= 1 } / count) * 100,
+                probabilityReleUp = (ranks.count { it == 2 } / count) * 100,
+                probabilityReleDown = (ranks.count { it == 15 && !isBl3 } / count) * 100,
+                probabilitySafe = (ranks.count { it < safeThreshold } / count) * 100,
+                monteCarloFrequency = (count / iterations) * 100
+            )
+        }.sortedBy { it.points }
     }
 
     private fun performMonteCarlo(table: List<Team>, remaining: List<Match>): List<TeamSimulationResult> {
         val teamStats = table.associate { it.teamName to mutableMapOf("meister" to 0, "directPromotion" to 0, "releUp" to 0, "releDown" to 0, "safe" to 0) }
         val isBl3 = selectedLeague == "bl3"
-        val isBl1 = selectedLeague == "bl1"
+        val safeThreshold = if (isBl3) 16 else 15
+        val teamGDs = table.associate { it.teamName to (it.goalDiff ?: 0) }
 
         repeat(monteCarloIterations) {
             val tempPoints = table.associate { it.teamName to it.points }.toMutableMap()
@@ -398,24 +392,35 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             for (match in remaining) {
                 val probs = getMatchProbabilities(match)
                 val r = Random.nextFloat()
+                
+                val t1Name = match.team1.teamName
+                val t2Name = match.team2.teamName
+                
+                if (!tempPoints.containsKey(t1Name) || !tempPoints.containsKey(t2Name)) continue
+
                 if (r < probs.home) {
-                    tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 3
+                    tempPoints[t1Name] = (tempPoints[t1Name] ?: 0) + 3
                 } else if (r < (probs.home + probs.draw)) {
-                    tempPoints[match.team1.teamName] = (tempPoints[match.team1.teamName] ?: 0) + 1
-                    tempPoints[match.team2.teamName] = (tempPoints[match.team2.teamName] ?: 0) + 1
+                    tempPoints[t1Name] = (tempPoints[t1Name] ?: 0) + 1
+                    tempPoints[t2Name] = (tempPoints[t2Name] ?: 0) + 1
                 } else {
-                    tempPoints[match.team2.teamName] = (tempPoints[match.team2.teamName] ?: 0) + 3
+                    tempPoints[t2Name] = (tempPoints[t2Name] ?: 0) + 3
                 }
             }
 
-            val sorted = tempPoints.toList().sortedByDescending { it.second }
+            // Tie-break by current Goal Difference
+            val sorted = tempPoints.toList().sortedWith(
+                compareByDescending<Pair<String, Int>> { it.second }
+                    .thenByDescending { teamGDs[it.first] ?: 0 }
+            )
+            
             sorted.forEachIndexed { index, (name, _) ->
                 val stats = teamStats[name] ?: return@forEachIndexed
                 if (index == 0) stats["meister"] = stats["meister"]!! + 1
                 if (index <= 1) stats["directPromotion"] = stats["directPromotion"]!! + 1
                 if (index == 2) stats["releUp"] = stats["releUp"]!! + 1
                 if (index == 15 && !isBl3) stats["releDown"] = stats["releDown"]!! + 1
-                if (index < 15) stats["safe"] = stats["safe"]!! + 1
+                if (index < safeThreshold) stats["safe"] = stats["safe"]!! + 1
             }
         }
 
@@ -431,7 +436,7 @@ class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
             TeamSimulationResult(
                 rank = 0,
                 name = team.teamName,
-                iconUrl = team.teamIconUrl,
+                iconUrl = team.teamIconUrl?.replace("http://", "https://"),
                 currentPoints = team.points,
                 probMeister = pMeister,
                 probDirectPromotion = pDirectPromotion,
@@ -540,21 +545,32 @@ fun OddsDebugDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text("Gelesene Quoten (Next Games)") },
         text = {
-            if (viewModel.cachedOdds.isEmpty()) {
-                Text("Keine Quoten geladen. Drücke 'Run' um sie zu aktualisieren.")
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
-                    items(viewModel.cachedOdds.toList()) { (match, probs) ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                        ) {
-                            Column(modifier = Modifier.padding(8.dp)) {
-                                Text(match, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("Home: ${(probs.home * 100).toInt()}%", fontSize = 11.sp)
-                                    Text("Draw: ${(probs.draw * 100).toInt()}%", fontSize = 11.sp)
-                                    Text("Away: ${((1f - probs.home - probs.draw) * 100).toInt()}%", fontSize = 11.sp)
+            Column {
+                if (viewModel.oddsQuotaUsed != null || viewModel.oddsQuotaRemaining != null) {
+                    Text(
+                        text = "API Quota: ${viewModel.oddsQuotaUsed ?: "?"} genutzt, ${viewModel.oddsQuotaRemaining ?: "?"} verbleibend",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+                
+                if (viewModel.cachedOdds.isEmpty()) {
+                    Text("Keine Quoten geladen. Drücke 'Run' um sie zu aktualisieren.")
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+                        items(viewModel.cachedOdds.toList()) { (match, probs) ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            ) {
+                                Column(modifier = Modifier.padding(8.dp)) {
+                                    Text(match, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text("Home: ${(probs.home * 100).toInt()}%", fontSize = 11.sp)
+                                        Text("Draw: ${(probs.draw * 100).toInt()}%", fontSize = 11.sp)
+                                        Text("Away: ${((1f - probs.home - probs.draw) * 100).toInt()}%", fontSize = 11.sp)
+                                    }
                                 }
                             }
                         }
@@ -672,7 +688,8 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                 AsyncImage(
                     model = teamResult.iconUrl,
                     contentDescription = null,
-                    modifier = Modifier.size(32.dp).padding(end = 8.dp)
+                    modifier = Modifier.size(32.dp).padding(end = 8.dp),
+                    error = painterResource(id = android.R.drawable.ic_menu_help)
                 )
                 Text(teamResult.name, fontWeight = FontWeight.Bold)
             }
@@ -699,7 +716,7 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                                     color = Color(0xFF2196F3),
                                     trackColor = Color(0xFF2196F3).copy(alpha = 0.1f)
                                 )
-                                Text("${String.format("%.1f", row.monteCarloFrequency)}%", fontSize = 9.sp)
+                                Text("${String.format(java.util.Locale.US, "%.1f", row.monteCarloFrequency)}%", fontSize = 9.sp)
                             }
                             
                             // Main Metric logic
@@ -724,7 +741,7 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                                     color = mainColor,
                                     trackColor = mainColor.copy(alpha = 0.1f)
                                 )
-                                Text("$mainLabel ${String.format("%.1f", mainVal)}%$asterisk", fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                                Text("$mainLabel ${String.format(java.util.Locale.US, "%.1f", mainVal)}%$asterisk", fontSize = 9.sp, fontWeight = FontWeight.Medium)
                             }
 
                             // Relegation Decision: Show either Upward or Downward Relegation per row
@@ -740,7 +757,7 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                                     color = releColor,
                                     trackColor = releColor.copy(alpha = 0.1f)
                                 )
-                                Text("$releLabel ${String.format("%.1f", releVal)}%", fontSize = 9.sp)
+                                Text("$releLabel ${String.format(java.util.Locale.US, "%.1f", releVal)}%", fontSize = 9.sp)
                             }
                         }
                     }
@@ -846,7 +863,8 @@ fun TeamRow(result: TeamSimulationResult, league: String, onClick: () -> Unit) {
                 contentDescription = null,
                 modifier = Modifier.size(28.dp).padding(end = 8.dp),
                 contentScale = ContentScale.Fit,
-                error = painterResource(id = android.R.drawable.ic_menu_help)
+                error = painterResource(id = android.R.drawable.ic_menu_help),
+                placeholder = painterResource(id = android.R.drawable.ic_menu_gallery)
             )
             
             Text(
@@ -912,11 +930,34 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val repository = SettingsRepository(applicationContext)
+
+        val imageLoader = ImageLoader.Builder(this)
+            .components {
+                add(SvgDecoder.Factory())
+            }
+            .okHttpClient {
+                OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        val request = chain.request().newBuilder()
+                            .header("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:100.0) Gecko/100.0 Firefox/100.0")
+                            .build()
+                        chain.proceed(request)
+                    }
+                    .build()
+            }
+            .crossfade(true)
+            .build()
+
+        // Coil als Singleton konfigurieren, damit alle AsyncImage-Aufrufe diesen Loader nutzen
+        coil.Coil.setImageLoader(imageLoader)
+
         enableEdgeToEdge()
         setContent {
             val viewModel: MainViewModel = viewModel(factory = MainViewModelFactory(repository))
-            MaterialTheme {
-                BundesligaApp(viewModel)
+            CompositionLocalProvider(LocalImageLoader provides imageLoader) {
+                MaterialTheme {
+                    BundesligaApp(viewModel)
+                }
             }
         }
     }
