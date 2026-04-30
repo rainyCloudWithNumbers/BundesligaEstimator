@@ -63,14 +63,24 @@ data class Team(
 
 @Serializable
 data class MatchTeam(
-    val teamName: String
+    val teamName: String,
+    val teamIconUrl: String? = null
 )
 
 @Serializable
 data class Match(
     val team1: MatchTeam,
     val team2: MatchTeam,
-    val matchIsFinished: Boolean
+    val matchIsFinished: Boolean,
+    val group: Group? = null,
+    val matchDateTime: String? = null
+)
+
+@Serializable
+data class Group(
+    val groupName: String? = null,
+    val groupID: Int? = null,
+    val groupOrderID: Int? = null
 )
 
 data class ConditionalResult(
@@ -157,7 +167,10 @@ data class TeamSimulationResult(
     val probAbstieg: Float
 )
 
+enum class AppMode { BUNDESLIGA, TOURNAMENT }
+
 class MainViewModel(private val repository: SettingsRepository) : ViewModel() {
+    var appMode by mutableStateOf(AppMode.BUNDESLIGA)
     var simulationResults by mutableStateOf<List<TeamSimulationResult>>(emptyList())
     var isLoading by mutableStateOf(false)
     var selectedLeague by mutableStateOf("bl1")
@@ -467,6 +480,7 @@ class MainViewModelFactory(private val repository: SettingsRepository) : ViewMod
 fun BundesligaApp(viewModel: MainViewModel) {
     var showSettings by remember { mutableStateOf(false) }
     var showOddsDebug by remember { mutableStateOf(false) }
+    val tournamentViewModel: TournamentViewModel = viewModel(factory = TournamentViewModelFactory(SettingsRepository(LocalContext.current)))
 
     Scaffold(
         topBar = {
@@ -478,45 +492,59 @@ fun BundesligaApp(viewModel: MainViewModel) {
                             contentDescription = null,
                             modifier = Modifier.size(66.dp).padding(end = 8.dp)
                         )
-                        Text("Bundesliga Estimator", fontWeight = FontWeight.Bold)
+                        Text(if (viewModel.appMode == AppMode.BUNDESLIGA) "Bundesliga Estimator" else "WC 2026 Sim", fontWeight = FontWeight.Bold)
                     }
                 },
                 actions = {
+                    IconButton(onClick = { 
+                        viewModel.appMode = if (viewModel.appMode == AppMode.BUNDESLIGA) AppMode.TOURNAMENT else AppMode.BUNDESLIGA 
+                    }) {
+                        Icon(
+                            painter = if (viewModel.appMode == AppMode.BUNDESLIGA) painterResource(id = android.R.drawable.ic_menu_today) else painterResource(id = android.R.drawable.ic_menu_sort_by_size),
+                            contentDescription = "Switch Mode"
+                        )
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
-                    Button(onClick = { viewModel.runSimulation() }, enabled = !viewModel.isLoading) {
-                        if (viewModel.isLoading) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Text("Run")
+                    if (viewModel.appMode == AppMode.BUNDESLIGA) {
+                        Button(onClick = { viewModel.runSimulation() }, enabled = !viewModel.isLoading) {
+                            if (viewModel.isLoading) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                            else Text("Run")
+                        }
                     }
                 }
             )
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
-            LeagueSelector(viewModel)
-            if (viewModel.oddsApiKey.isNotBlank()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(
-                        checked = viewModel.useOdds,
-                        onCheckedChange = { viewModel.updateUseOdds(it) }
-                    )
-                    Text("Use Odds API for next games", fontSize = 14.sp, modifier = Modifier.weight(1f))
-                    if (viewModel.useOdds) {
-                        IconButton(onClick = { showOddsDebug = true }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Default.Info, contentDescription = "Show Odds", tint = MaterialTheme.colorScheme.primary)
+            if (viewModel.appMode == AppMode.BUNDESLIGA) {
+                LeagueSelector(viewModel)
+                if (viewModel.oddsApiKey.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = viewModel.useOdds,
+                            onCheckedChange = { viewModel.updateUseOdds(it) }
+                        )
+                        Text("Use Odds API for next games", fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        if (viewModel.useOdds) {
+                            IconButton(onClick = { showOddsDebug = true }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.Info, contentDescription = "Show Odds", tint = MaterialTheme.colorScheme.primary)
+                            }
                         }
                     }
                 }
-            }
-            TableHeader(viewModel.selectedLeague)
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(viewModel.simulationResults) { result ->
-                    TeamRow(result, viewModel.selectedLeague) { viewModel.showDetails(result) }
+                TableHeader(viewModel.selectedLeague)
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    items(viewModel.simulationResults) { result ->
+                        TeamRow(result, viewModel.selectedLeague) { viewModel.showDetails(result) }
+                    }
                 }
+            } else {
+                TournamentView(tournamentViewModel)
             }
         }
 

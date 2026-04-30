@@ -19,6 +19,7 @@ class SettingsRepository(private val context: Context) {
         val PROB_DRAW = floatPreferencesKey("prob_draw")
         val ODDS_API_KEY = stringPreferencesKey("odds_api_key")
         val USE_ODDS = booleanPreferencesKey("use_odds")
+        val SAVED_GROUPS = stringPreferencesKey("saved_groups")
     }
 
     val monteCarloIterations: Flow<Int> = context.dataStore.data.map { preferences ->
@@ -47,6 +48,10 @@ class SettingsRepository(private val context: Context) {
 
     val useOdds: Flow<Boolean> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.USE_ODDS] ?: false
+    }
+
+    val savedGroups: Flow<String?> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.SAVED_GROUPS]
     }
 
     suspend fun updateMonteCarloIterations(iterations: Int) {
@@ -78,6 +83,12 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.ODDS_API_KEY] = apiKey
             preferences[PreferencesKeys.USE_ODDS] = useOdds
+        }
+    }
+
+    suspend fun saveGroups(groupsJson: String) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SAVED_GROUPS] = groupsJson
         }
     }
 }
