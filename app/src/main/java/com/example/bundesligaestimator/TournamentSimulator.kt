@@ -42,6 +42,7 @@ data class TournamentTeam(
     var goalsFor: Int = 0,
     var goalsAgainst: Int = 0,
     var rank: Int = 0,
+    var formScore: Float = 0f,
     val isMock: Boolean = false
 ) {
     val goalsDiff: Int get() = goalsFor - goalsAgainst
@@ -85,6 +86,65 @@ class TournamentViewModel(private val repository: SettingsRepository) : ViewMode
     var probDraw by mutableFloatStateOf(0.25f)
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    private val fifaRankings = mapOf(
+        "France" to 1, "Frankreich" to 1,
+        "Spain" to 2, "Spanien" to 2,
+        "Argentina" to 3, "Argentinien" to 3,
+        "England" to 4,
+        "Portugal" to 5,
+        "Brazil" to 6, "Brasilien" to 6,
+        "Netherlands" to 7, "Niederlande" to 7,
+        "Morocco" to 8, "Marokko" to 8,
+        "Belgium" to 9, "Belgien" to 9,
+        "Germany" to 10, "Deutschland" to 10,
+        "Croatia" to 11, "Kroatien" to 11,
+        "Italy" to 12, "Italien" to 12,
+        "Colombia" to 13, "Kolumbien" to 13,
+        "Senegal" to 14,
+        "Mexico" to 15, "Mexiko" to 15,
+        "USA" to 16,
+        "Uruguay" to 17,
+        "Japan" to 18,
+        "Switzerland" to 19, "Schweiz" to 19,
+        "Denmark" to 20, "Dänemark" to 20,
+        "Türkiye" to 21, "Türkei" to 21,
+        "Ecuador" to 22,
+        "Austria" to 23, "Österreich" to 23,
+        "South Korea" to 24, "Südkorea" to 24,
+        "Nigeria" to 25,
+        "Australia" to 26, "Australien" to 26,
+        "Algeria" to 27, "Algerien" to 27,
+        "Egypt" to 28, "Ägypten" to 28,
+        "Canada" to 29, "Kanada" to 29,
+        "Norway" to 30, "Norwegen" to 30,
+        "Ukraine" to 31,
+        "Panama" to 32,
+        "Ivory Coast" to 33, "Elfenbeinküste" to 33,
+        "Poland" to 34, "Polen" to 34,
+        "Russia" to 35, "Russland" to 35,
+        "Wales" to 36,
+        "Sweden" to 37, "Schweden" to 37,
+        "Serbia" to 38, "Serbien" to 38,
+        "Paraguay" to 39,
+        "Czech Republic" to 40, "Tschechien" to 40,
+        "Hungary" to 41, "Ungarn" to 41,
+        "Scotland" to 42, "Schottland" to 42,
+        "Tunisia" to 43, "Tunesien" to 43,
+        "Cameroon" to 44, "Kamerun" to 44,
+        "DR Congo" to 45, "Dem. Rep. Kongo" to 45,
+        "Greece" to 46, "Griechenland" to 46,
+        "Slovakia" to 47, "Slowakei" to 47,
+        "Venezuela" to 48,
+        "Uzbekistan" to 49, "Usbekistan" to 49,
+        "Costa Rica" to 50,
+        "Chile" to 52,
+        "Peru" to 54,
+        "Ghana" to 60,
+        "Saudi Arabia" to 62, "Saudi-Arabien" to 62,
+        "Qatar" to 65, "Katar" to 65,
+        "South Africa" to 70, "Südafrika" to 70
+    )
 
     private val teamNameTranslation = mapOf(
         "Deutschland" to "Germany",
@@ -211,10 +271,10 @@ class TournamentViewModel(private val repository: SettingsRepository) : ViewMode
         }
     }
 
-    private fun getMatchProbabilities(t1: String, t2: String): MatchProbabilities {
+    private fun getMatchProbabilities(t1: TournamentTeam, t2: TournamentTeam): MatchProbabilities {
         if (useOdds) {
-            val name1 = (teamNameTranslation[t1] ?: t1).lowercase()
-            val name2 = (teamNameTranslation[t2] ?: t2).lowercase()
+            val name1 = (teamNameTranslation[t1.name] ?: t1.name).lowercase()
+            val name2 = (teamNameTranslation[t2.name] ?: t2.name).lowercase()
             
             val key = cachedOdds.keys.find { oddsKey ->
                 val ok = oddsKey.lowercase()
@@ -223,7 +283,36 @@ class TournamentViewModel(private val repository: SettingsRepository) : ViewMode
             }
             if (key != null) return cachedOdds[key]!!
         }
-        return MatchProbabilities(probHomeWin, probDraw, false)
+
+        // Default logic using FIFA Rank and Tournament Form
+        val r1 = fifaRankings[t1.name] ?: 100
+        val r2 = fifaRankings[t2.name] ?: 100
+        
+        // Base strength from rank - more weighted for top teams to avoid "Tunisia" effect
+        val baseS1 = when {
+            r1 <= 5 -> 250f - r1 * 10
+            r1 <= 15 -> 180f - r1 * 3
+            r1 <= 30 -> 140f - r1
+            else -> (110 - r1).coerceAtLeast(10).toFloat()
+        }
+        val baseS2 = when {
+            r2 <= 5 -> 250f - r2 * 10
+            r2 <= 15 -> 180f - r2 * 3
+            r2 <= 30 -> 140f - r2
+            else -> (110 - r2).coerceAtLeast(10).toFloat()
+        }
+        
+        // Form bonus weighted by current tournament form score
+        val totalS1 = baseS1 + t1.formScore
+        val totalS2 = baseS2 + t2.formScore
+        
+        val diffRatio = (totalS1 - totalS2) / (totalS1 + totalS2).coerceAtLeast(1f)
+        
+        // Adjust default probabilities based on strength difference
+        val adjustedWin = (probHomeWin + diffRatio * 0.45f).coerceIn(0.05f, 0.90f)
+        val adjustedDraw = (probDraw - Math.abs(diffRatio) * 0.15f).coerceIn(0.05f, 0.35f)
+        
+        return MatchProbabilities(adjustedWin, adjustedDraw, false)
     }
 
     @Serializable
@@ -501,7 +590,7 @@ class TournamentViewModel(private val repository: SettingsRepository) : ViewMode
     }
 
     private fun simulateGroupMatch(t1: TournamentTeam, t2: TournamentTeam): SimulatedMatch {
-        val probs = getMatchProbabilities(t1.name, t2.name)
+        val probs = getMatchProbabilities(t1, t2)
         val r = Random.nextFloat()
         
         val s1: Int
@@ -523,7 +612,24 @@ class TournamentViewModel(private val repository: SettingsRepository) : ViewMode
         
         t1.goalsFor += s1; t1.goalsAgainst += s2
         t2.goalsFor += s2; t2.goalsAgainst += s1
-        if (s1 > s2) t1.points += 3 else if (s2 > s1) t2.points += 3 else { t1.points += 1; t2.points += 1 }
+        
+        // Update points and weighted form score
+        val r1 = fifaRankings[t1.name] ?: 100
+        val r2 = fifaRankings[t2.name] ?: 100
+        
+        if (s1 > s2) {
+            t1.points += 3
+            // Underwood factor: high rank beating low rank gives more form points
+            t1.formScore += (r1.toFloat() / r2.toFloat().coerceAtLeast(1f)).coerceIn(0.5f, 3.0f) * 15f
+        } else if (s2 > s1) {
+            t2.points += 3
+            t2.formScore += (r2.toFloat() / r1.toFloat().coerceAtLeast(1f)).coerceIn(0.5f, 3.0f) * 15f
+        } else {
+            t1.points += 1; t2.points += 1
+            // Draw gives small boost if drawn against stronger opponent
+            t1.formScore += (r1.toFloat() / r2.toFloat().coerceAtLeast(1f)).coerceIn(0.5f, 2.0f) * 5f
+            t2.formScore += (r2.toFloat() / r1.toFloat().coerceAtLeast(1f)).coerceIn(0.5f, 2.0f) * 5f
+        }
 
         return SimulatedMatch(
             team1 = t1.copy(), 
@@ -540,7 +646,7 @@ class TournamentViewModel(private val repository: SettingsRepository) : ViewMode
     }
 
     private fun simulateKnockoutMatch(t1: TournamentTeam, t2: TournamentTeam): SimulatedMatch {
-        val probs = getMatchProbabilities(t1.name, t2.name)
+        val probs = getMatchProbabilities(t1, t2)
         val r = Random.nextFloat()
         
         val pHomeWinOnly = probs.home / (probs.home + (1f - probs.home - probs.draw))

@@ -747,20 +747,34 @@ fun TeamDetailDialog(teamResult: TeamSimulationResult, details: List<Conditional
                                 Text("${String.format(java.util.Locale.US, "%.1f", row.monteCarloFrequency)}%", fontSize = 9.sp)
                             }
                             
-                            // Main Metric logic
+                            // Selection of the most relevant metric to display (Meister, Aufstieg, or Safe)
                             val threshold = (teamResult.currentPoints + (details.last().points - teamResult.currentPoints) / 2)
-                            val useHighGoal = if (isBl1) {
-                                row.probabilityMeister > 0.5f && row.points > threshold
+                            
+                            val mainLabel: String
+                            val mainVal: Float
+                            
+                            // 1. If Meister is guaranteed or very likely (>80%), show M
+                            // 2. Otherwise, if Promotion is guaranteed or we are in "success territory" (>threshold), show A
+                            // 3. Otherwise show S (Safe)
+                            
+                            if (row.probabilityMeister > 80f || (isBl1 && row.probabilityMeister > 0.5f && (row.points > threshold || row.probabilitySafe > 99f))) {
+                                mainLabel = "M:"
+                                mainVal = row.probabilityMeister
+                            } else if (!isBl1 && (row.probabilityDirectPromotion > 99.9f || (row.probabilityDirectPromotion > 0.5f && row.points > threshold))) {
+                                mainLabel = "A:"
+                                mainVal = row.probabilityDirectPromotion
                             } else {
-                                row.probabilityDirectPromotion > 0.5f && row.points > threshold
+                                mainLabel = "S:"
+                                mainVal = row.probabilitySafe
                             }
 
-                            val mainVal = if (useHighGoal) (if (isBl1) row.probabilityMeister else row.probabilityDirectPromotion) else row.probabilitySafe
-                            val mainLabel = if (useHighGoal) (if (isBl1) "M:" else "A:") else "S:"
-                            val asterisk = if (!isBl1 && useHighGoal && row.probabilityMeister > 50f) "*" else ""
+                            val asterisk = if (!isBl1 && mainLabel == "A:" && row.probabilityMeister > 50f) "*" else ""
                             
-                            val mainColor = if (useHighGoal) (if (isBl1) Color(0xFFFFD700) else Color(0xFF2196F3)) 
-                                            else (if (mainVal > 80f) Color(0xFF4CAF50) else if (mainVal > 30f) Color(0xFFFFC107) else Color(0xFFF44336))
+                            val mainColor = when (mainLabel) {
+                                "M:" -> Color(0xFFFFD700) // Gold for Meister
+                                "A:" -> Color(0xFF2196F3) // Blue for Aufstieg
+                                else -> if (mainVal > 80f) Color(0xFF4CAF50) else if (mainVal > 30f) Color(0xFFFFC107) else Color(0xFFF44336)
+                            }
                             
                             Column(modifier = Modifier.weight(1.3f).padding(end = 4.dp)) {
                                 LinearProgressIndicator(
